@@ -2,7 +2,7 @@ import time
 import requests
 import streamlit as st
 from collections import Counter
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 # =============================
 # Page
@@ -16,7 +16,10 @@ TMDB_API_BASE = "https://api.themoviedb.org/3"
 TMDB_DISCOVER_URL = f"{TMDB_API_BASE}/discover/movie"
 POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
-# 사용자 선택(4분류) -> TMDB with_genres 값 (OR는 |)
+# 사용자 선택(4분류) -> TMDB with_genres 값
+# TMDB Discover: with_genres는
+# - "," 는 AND
+# - "|" 는 OR
 WITH_GENRES_MAP = {
     "로맨스/드라마": "10749|18",   # 로맨스 OR 드라마
     "액션/어드벤처": "28",
@@ -24,15 +27,6 @@ WITH_GENRES_MAP = {
     "코미디": "35",
 }
 
-# 결과 타이틀용
-GENRE_TITLE = {
-    "로맨스/드라마": "로맨스/드라마",
-    "액션/어드벤처": "액션/어드벤처",
-    "SF/판타지": "SF/판타지",
-    "코미디": "코미디",
-}
-
-# 장르별 이모지 (카드에 표시)
 GENRE_EMOJI = {
     "로맨스/드라마": "💘🎭",
     "액션/어드벤처": "🔥🧗",
@@ -45,6 +39,7 @@ GENRE_EMOJI = {
 # =============================
 st.sidebar.header("🔑 TMDB 설정")
 api_key = st.sidebar.text_input("TMDB API Key", type="password")
+debug_mode = st.sidebar.toggle("디버그 모드(에러 원인 표시)", value=False)
 st.sidebar.caption("TMDB에서 발급받은 API Key를 입력하면 추천 영화가 표시돼요.")
 
 # =============================
@@ -112,39 +107,36 @@ questions = [
 # =============================
 # Helpers
 # =============================
-def short_text(text: str, n: int = 90) -> str:
+def short_text(text: str, n: int = 95) -> str:
     text = (text or "").strip()
     if not text:
         return "짧은 소개(줄거리) 정보가 없습니다."
     return text if len(text) <= n else text[:n].rstrip() + "…"
 
+
 def ensure_all_answered(picks: List[Optional[str]]) -> bool:
     return all(p is not None for p in picks)
 
+
 def analyze_genre_weighted(picks: List[str]) -> Tuple[str, Dict[str, int], str]:
     """
-    고도화 포인트:
-    - 가중치 점수(뒤 문항일수록 조금 더 가중) + 동점 타이브레이크(단순 카운트)
+    가중치 점수 + 동점 타이브레이크.
     """
-    # 문항 중요도(예: 1~5번 점점 중요하게)
-    weights = [1, 1, 2, 2, 3]
-
+    weights = [1, 1, 2, 2, 3]  # 뒤 문항 가중
     score = Counter()
     raw = Counter(picks)
 
     for i, g in enumerate(picks):
         score[g] += weights[i]
 
-    # 1) 가중치 점수 우선
     best_score = max(score.values())
     candidates = [g for g, s in score.items() if s == best_score]
 
-    # 2) 동점이면 단순 선택 빈도
     if len(candidates) > 1:
         best_raw = max(raw[g] for g in candidates)
         candidates = [g for g in candidates if raw[g] == best_raw]
 
-    # 3) 그래도 동점이면 고정 우선순위(원하는 취향대로 조절 가능)
+    # 마지막 동점은 고정 우선순위(원하는대로 조절 가능)
     priority = ["로맨스/드라마", "액션/어드벤처", "SF/판타지", "코미디"]
     final = sorted(candidates, key=lambda x: priority.index(x))[0]
 
@@ -156,42 +148,63 @@ def analyze_genre_weighted(picks: List[str]) -> Tuple[str, Dict[str, int], str]:
     }
     return final, dict(score), reason_map.get(final, "선택 패턴을 기반으로 추천했어요.")
 
-def tmdb_request_with_retry(
-    session: requests.Session,
+
+def tmdb_request(
     url: str,
     params: dict,
     max_retries: int = 3,
     timeout: int = 15,
-) -> dict:
+) -> Tuple[bool, Optional[dict], str, Optional[int]]:
     """
-    429/일시 오류에 대한 간단 재시도(backoff).
+    TMDB 요청을 안전하게 수행.
+    - 성공: (True, json, "", status_code)
+    - 실패: (False, None, error_message, status_code)
     """
     backoff = 0.8
-    last_err = None
+    last_error = ""
+    last_status = None
 
-    for attempt in range(max_retries):
+    for _ in range(max_retries):
         try:
-            r = session.get(url, params=params, timeout=timeout)
+            r = requests.get(url, params=params, timeout=timeout)
+            last_status = r.status_code
+
             if r.status_code == 429:
-                # Too Many Requests
+                last_error = "요청이 너무 많아요(429). 잠시 후 다시 시도해주세요."
                 time.sleep(backoff)
                 backoff *= 1.8
                 continue
-            r.raise_for_status()
-            return r.json()
-        except requests.RequestException as e:
-            last_err = e
-            time.sleep(backoff)
-            backoff *= 1.8
 
-    raise RuntimeError(f"TMDB 요청 실패: {last_err}")
+            if r.status_code in (401, 403):
+                # 키/권한 문제
+                # 응답 바디에 key 관련 정보가 있어도 노출 위험 줄이기 위해 메시지 간단화
+                return False, None, "API Key가 유효하지 않거나 권한이 없어요(401/403).", r.status_code
+
+            r.raise_for_status()
+            return True, r.json(), "", r.status_code
+
+        except requests.exceptions.Timeout:
+            last_error = "TMDB 요청 시간이 초과됐어요(Timeout)."
+        except requests.exceptions.ConnectionError:
+            last_error = "네트워크 연결 오류가 발생했어요(ConnectionError)."
+        except requests.exceptions.HTTPError:
+            # 기타 HTTP 오류
+            last_error = f"TMDB 서버 응답 오류(HTTP {last_status})."
+        except requests.exceptions.RequestException as e:
+            last_error = f"요청 오류: {type(e).__name__}"
+
+        time.sleep(backoff)
+        backoff *= 1.8
+
+    return False, None, last_error or "TMDB 요청에 실패했어요.", last_status
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_discover_movies(api_key: str, with_genres: str, limit: int = 5) -> List[dict]:
+def fetch_discover_movies_success_only(api_key: str, with_genres: str, limit: int = 5) -> List[dict]:
     """
-    Discover로 '인기' 기준 영화 가져오기 + 품질 필터.
+    성공 결과만 캐시에 담기도록:
+    - 이 함수는 '성공' 케이스만 반환하도록 설계(실패는 밖에서 처리)
     """
-    session = requests.Session()
     params = {
         "api_key": api_key,
         "with_genres": with_genres,
@@ -200,79 +213,47 @@ def fetch_discover_movies(api_key: str, with_genres: str, limit: int = 5) -> Lis
         "include_adult": "false",
         "include_video": "false",
         "page": 1,
-        # 너무 투표 수 적은 결과(정보 빈약/노이즈) 줄이기
-        "vote_count.gte": 200,
+        # 품질 필터(가끔 서버/지역에 따라 문제 생길 수 있어 폴백 전략도 함께 사용)
+        "vote_count.gte": 100,
     }
-    data = tmdb_request_with_retry(session, TMDB_DISCOVER_URL, params=params)
+    ok, data, err, status = tmdb_request(TMDB_DISCOVER_URL, params=params)
+    if not ok or not data:
+        # cache 함수 안에서는 예외를 던지면 redacted가 떠서,
+        # 여기서는 "빈 리스트"를 반환하고 밖에서 폴백/에러 처리.
+        return []
     return (data.get("results") or [])[:limit]
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_movie_details(api_key: str, movie_id: int) -> dict:
+
+def fetch_discover_movies_with_fallback(api_key: str, with_genres: str, limit: int = 5) -> Tuple[List[dict], str]:
     """
-    append_to_response로 credits/videos를 한번에 붙여서 가져오기.
+    1차: 필터 포함(캐시됨)
+    2차 폴백: 필터 제거(직접 호출, 실패 원인 메시지 확보)
     """
-    session = requests.Session()
-    url = f"{TMDB_API_BASE}/movie/{movie_id}"
-    params = {
+    movies = fetch_discover_movies_success_only(api_key, with_genres, limit=limit)
+    if movies:
+        return movies, ""
+
+    # 폴백(필터 최소화)
+    params2 = {
         "api_key": api_key,
+        "with_genres": with_genres,
         "language": "ko-KR",
-        "append_to_response": "credits,videos",
+        "sort_by": "popularity.desc",
+        "page": 1,
+        "include_adult": "false",
+        "include_video": "false",
     }
-    return tmdb_request_with_retry(session, url, params=params)
+    ok2, data2, err2, status2 = tmdb_request(TMDB_DISCOVER_URL, params=params2)
+    if not ok2:
+        hint = err2
+        if status2 == 401 or status2 == 403:
+            hint += " (사이드바의 키를 다시 확인해 주세요)"
+        return [], hint
+    results = (data2.get("results") or [])[:limit]
+    if not results:
+        return [], "해당 장르에서 결과가 거의 없어요(검색 조건/언어 설정 영향일 수 있어요)."
+    return results, ""
 
-def build_recommend_reason(
-    top_genre: str,
-    base_reason: str,
-    movie: dict,
-    details: dict,
-) -> str:
-    """
-    추천 이유를 '장르 매칭 + 평점/캐스트/감독/예고편' 단서로 짧게 구성.
-    """
-    rating = float(movie.get("vote_average") or 0.0)
-    vote_count = int(movie.get("vote_count") or 0)
-
-    # 감독/주연
-    director = None
-    cast_names = []
-    credits = details.get("credits") or {}
-    crew = credits.get("crew") or []
-    cast = credits.get("cast") or []
-
-    for c in crew:
-        if c.get("job") == "Director":
-            director = c.get("name")
-            break
-
-    for c in cast[:2]:
-        if c.get("name"):
-            cast_names.append(c["name"])
-
-    # 예고편 유무
-    has_trailer = False
-    videos = (details.get("videos") or {}).get("results") or []
-    for v in videos:
-        if (v.get("site") == "YouTube") and (v.get("type") in ["Trailer", "Teaser"]):
-            has_trailer = True
-            break
-
-    bits = [base_reason]
-
-    if rating >= 7.5 and vote_count >= 200:
-        bits.append("평점/반응도 좋은 편이라 만족도가 높을 확률이 커요.")
-    else:
-        bits.append("요즘 인기작이라 가볍게 즐기기 좋아요.")
-
-    if director:
-        bits.append(f"감독: {director}.")
-    if cast_names:
-        bits.append(f"주연: {', '.join(cast_names)}.")
-    if has_trailer:
-        bits.append("예고편/영상도 있어 ‘찍먹’하기 좋아요.")
-
-    # 너무 길어지면 컷
-    reason = " ".join(bits)
-    return reason if len(reason) <= 170 else reason[:170].rstrip() + "…"
 
 def render_movie_card(movie: dict, emoji: str, reason: str):
     title = movie.get("title") or "제목 없음"
@@ -291,10 +272,19 @@ def render_movie_card(movie: dict, emoji: str, reason: str):
         st.caption(overview)
         st.markdown(f"**추천 이유:** {reason}")
 
+
+def build_reason(base_reason: str, movie: dict) -> str:
+    rating = float(movie.get("vote_average") or 0.0)
+    vote_count = int(movie.get("vote_count") or 0)
+    extra = "평점/반응도 좋은 편이라 만족도가 높을 확률이 커요." if (rating >= 7.3 and vote_count >= 200) else "요즘 인기작이라 가볍게 즐기기 좋아요."
+    text = f"{base_reason} {extra}"
+    return text if len(text) <= 170 else text[:170].rstrip() + "…"
+
+
 # =============================
 # Survey (form)
 # =============================
-answers = []
+answers: List[Optional[str]] = []
 
 with st.form("quiz_form"):
     for q in questions:
@@ -319,40 +309,47 @@ if submitted:
         st.warning("5개 질문에 모두 답해야 결과를 볼 수 있어요!")
         st.stop()
 
-    top_genre, score_map, base_reason = analyze_genre_weighted(answers)
+    picks = [a for a in answers if a is not None]
+    top_genre, score_map, base_reason = analyze_genre_weighted(picks)
     emoji = GENRE_EMOJI.get(top_genre, "🎬")
-    title_genre = GENRE_TITLE.get(top_genre, top_genre)
+    with_genres = WITH_GENRES_MAP[top_genre]
 
-    with st.spinner("분석 중... TMDB에서 인기 영화를 가져오고 있어요!"):
-        with_genres = WITH_GENRES_MAP[top_genre]
-        movies = fetch_discover_movies(api_key, with_genres, limit=5)
+    # 로딩
+    with st.spinner("분석 중... TMDB에서 인기 영화를 가져오는 중!"):
+        movies, err_hint = fetch_discover_movies_with_fallback(api_key, with_genres, limit=5)
 
-        # 추천 이유를 고도화하기 위해 상세 정보도 가져오기(캐시 적용)
-        detailed_list = []
-        for m in movies:
-            mid = m.get("id")
-            if not mid:
-                detailed_list.append((m, {}))
-                continue
-            details = fetch_movie_details(api_key, int(mid))
-            detailed_list.append((m, details))
-
-    # 1) 요구사항: 결과 제목
-    st.markdown(f"# 당신에게 딱인 장르는: **{emoji} {title_genre}**!")
-    st.caption(base_reason)
-
-    # (선택) 디버그/설명용 점수표를 보고 싶으면 주석 해제
-    # st.write("점수표:", score_map)
+    if err_hint:
+        st.error(f"TMDB 추천을 가져오지 못했어요: {err_hint}")
+        if debug_mode:
+            st.code(
+                f"debug:\n"
+                f"- top_genre: {top_genre}\n"
+                f"- with_genres: {with_genres}\n"
+                f"- score_map: {score_map}\n",
+                language="text",
+            )
+        st.stop()
 
     if not movies:
         st.warning("추천 영화를 찾지 못했어요. 잠시 후 다시 시도해 주세요.")
+        if debug_mode:
+            st.code(
+                f"debug:\n"
+                f"- top_genre: {top_genre}\n"
+                f"- with_genres: {with_genres}\n"
+                f"- score_map: {score_map}\n",
+                language="text",
+            )
         st.stop()
 
-    st.write("")  # spacing
+    # 결과 타이틀
+    st.markdown(f"# 당신에게 딱인 장르는: **{emoji} {top_genre}**!")
+    st.caption(base_reason)
+    st.write("")
 
-    # 2) 요구사항: 3열 카드 레이아웃
+    # 3열 카드 레이아웃
     cols = st.columns(3)
-    for idx, (movie, details) in enumerate(detailed_list):
-        reason = build_recommend_reason(top_genre, base_reason, movie, details)
+    for idx, movie in enumerate(movies):
+        why = build_reason(base_reason, movie)
         with cols[idx % 3]:
-            render_movie_card(movie, emoji, reason)
+            render_movie_card(movie, emoji, why)
