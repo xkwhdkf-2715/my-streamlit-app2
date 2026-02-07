@@ -35,9 +35,59 @@ TOUR_API_KEY = tour_key_input if tour_key_input else tour_key_env
 # TourAPI Constants
 # =========================================================
 TOUR_BASE = "https://apis.data.go.kr/B551011/KorService2"
-
-# contentTypeId
 CONTENT_TYPE_TOUR = 12  # 관광지
+
+# =========================================================
+# CSS (카드 디자인 강화)
+# =========================================================
+st.markdown(
+    """
+    <style>
+    .big-card img {
+        border-radius: 18px;
+    }
+    .spot-title {
+        font-size: 22px;
+        font-weight: 800;
+        margin-top: 10px;
+        margin-bottom: 6px;
+    }
+    .spot-addr {
+        font-size: 14px;
+        opacity: 0.7;
+        margin-bottom: 10px;
+    }
+    .spot-reason {
+        font-size: 15px;
+        line-height: 1.5;
+        background: rgba(0,0,0,0.04);
+        padding: 12px 12px;
+        border-radius: 14px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# =========================================================
+# Session State
+# =========================================================
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {
+            "role": "assistant",
+            "content": "좋아요! 😊\n예산, 여행 기간(몇박 몇일), 출발 지역, 좋아하는 분위기(바다/산/도시/맛집/카페 등)를 편하게 입력해줘요!"
+        }
+    ]
+
+if "results" not in st.session_state:
+    st.session_state.results = None  # 추천 결과(여행지 리스트)
+
+if "plan" not in st.session_state:
+    st.session_state.plan = None  # OpenAI가 만든 추천 조건 JSON
+
+if "reasons" not in st.session_state:
+    st.session_state.reasons = {}  # contentid -> 추천 이유(LLM 생성)
 
 # =========================================================
 # UI Header
@@ -74,17 +124,6 @@ q3 = st.radio(
 st.divider()
 
 # =========================================================
-# Chat State
-# =========================================================
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "assistant",
-            "content": "좋아요! 😊\n예산, 여행 기간(몇박 몇일), 출발 지역, 좋아하는 분위기(바다/산/도시/맛집/카페 등)를 편하게 입력해줘요!"
-        }
-    ]
-
-# =========================================================
 # Chat UI
 # =========================================================
 st.subheader("💬 추가 정보 입력 (예산/기간/출발지 등)")
@@ -93,6 +132,7 @@ st.caption("이 대화 내용도 추천에 반영돼요.")
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
+
 
 # =========================================================
 # OpenAI Streaming Helper
@@ -118,7 +158,7 @@ def stream_openai(client: OpenAI, messages: list) -> str:
 
 
 # =========================================================
-# TourAPI Request Helper
+# TourAPI Helper
 # =========================================================
 def tourapi_get(endpoint: str, params: dict) -> dict:
     url = f"{TOUR_BASE}/{endpoint}"
@@ -146,12 +186,9 @@ def safe_items(data: dict) -> list:
 
 
 # =========================================================
-# Travel Spot Fetch
+# Fetch Spots
 # =========================================================
-def fetch_spots_by_area(area_code: int, limit: int = 20) -> list:
-    """
-    areaBasedList2로 관광지(12) 가져오기
-    """
+def fetch_spots_by_area(area_code: int, limit: int = 30) -> list:
     data = tourapi_get(
         "areaBasedList2",
         {
@@ -166,9 +203,6 @@ def fetch_spots_by_area(area_code: int, limit: int = 20) -> list:
 
 
 def filter_spots_with_images(spots: list) -> list:
-    """
-    이미지가 있는 것만 우선 사용
-    """
     filtered = []
     for s in spots:
         img = s.get("firstimage") or s.get("firstimage2")
@@ -181,14 +215,6 @@ def filter_spots_with_images(spots: list) -> list:
 # OpenAI -> 추천 조건 추출(JSON)
 # =========================================================
 def extract_recommendation_plan(client: OpenAI, survey_context: str, chat_messages: list) -> dict:
-    """
-    OpenAI에게:
-    - 지역 후보(areaCode) 2~3개
-    - 여행 키워드
-    - 추천 이유(한줄)
-    를 JSON으로 뽑게 함
-    """
-
     system_prompt = """
 너는 국내 여행지 추천을 위한 플래너야.
 사용자의 설문 결과 + 채팅 내용을 바탕으로
@@ -221,48 +247,51 @@ areaCode는 TourAPI 기준으로 추정해도 됨.
 
     text = res.choices[0].message.content.strip()
 
-    # JSON 파싱
     try:
         return json.loads(text)
     except Exception:
-        # JSON이 깨진 경우를 대비한 최소 폴백
         return {
-            "areas": [{"name": "서울", "areaCode": 1}, {"name": "부산", "areaCode": 6}, {"name": "제주", "areaCode": 39}],
+            "areas": [
+                {"name": "서울", "areaCode": 1},
+                {"name": "부산", "areaCode": 6},
+                {"name": "제주", "areaCode": 39},
+            ],
             "keywords": [],
             "style_summary": "일반적인 국내 여행 추천",
         }
 
 
 # =========================================================
-# 추천 여행지 선정 로직
+# Pick Top 3
 # =========================================================
 def pick_top3_spots(plan: dict) -> list:
-    """
-    - areas 순서대로 TourAPI에서 관광지 가져오기
-    - 이미지 있는 것 우선
-    - 중복 제거 후 3개 선택
-    """
     picked = []
     seen = set()
 
     areas = plan.get("areas", [])
     if not areas:
-        areas = [{"name": "서울", "areaCode": 1}, {"name": "부산", "areaCode": 6}, {"name": "제주", "areaCode": 39}]
+        areas = [
+            {"name": "서울", "areaCode": 1},
+            {"name": "부산", "areaCode": 6},
+            {"name": "제주", "areaCode": 39},
+        ]
 
     for area in areas:
         area_code = area.get("areaCode")
         if not area_code:
             continue
 
-        spots = fetch_spots_by_area(area_code, limit=30)
+        spots = fetch_spots_by_area(area_code, limit=35)
         spots = filter_spots_with_images(spots)
 
         for s in spots:
             cid = s.get("contentid")
             if not cid or cid in seen:
                 continue
+
             seen.add(cid)
             picked.append(s)
+
             if len(picked) >= 3:
                 return picked
 
@@ -270,25 +299,95 @@ def pick_top3_spots(plan: dict) -> list:
 
 
 # =========================================================
-# Card UI
+# OpenAI: 카드 추천 이유 생성 (핵심!)
 # =========================================================
-def render_spot_card(spot: dict, why: str):
+@st.cache_data(ttl=3600, show_spinner=False)
+def generate_reason_for_spot(
+    openai_key: str,
+    survey_context: str,
+    chat_summary: str,
+    spot_title: str,
+    spot_addr: str,
+    keywords: list,
+) -> str:
+    """
+    카드에 넣을 추천 이유 1~2줄 생성
+    """
+
+    client = OpenAI(api_key=openai_key)
+
+    prompt = f"""
+너는 국내 여행지 추천 전문가야.
+사용자의 여행 선호를 바탕으로 아래 관광지를 추천하는 이유를 1~2줄로 짧게 작성해줘.
+조건:
+- 너무 과장하지 말 것
+- 목적(힐링/휴양/액티비티/관광), 교통(기차/버스/차/비행기), 동반자(혼자/연인/가족/친구) 중 최소 2개는 언급
+- 장소 이름을 꼭 포함
+- 한국어로
+- 2문장 이내
+
+[사용자 선호]
+{survey_context}
+
+[사용자 추가 입력 요약]
+{chat_summary}
+
+[추천 키워드]
+{", ".join(keywords) if keywords else "없음"}
+
+[관광지]
+- 이름: {spot_title}
+- 주소: {spot_addr}
+"""
+
+    res = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "너는 친절하고 간단하게 말하는 여행 추천 AI야."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.6,
+    )
+
+    text = res.choices[0].message.content.strip()
+    return text
+
+
+def build_chat_summary(messages: list) -> str:
+    """
+    대화 전체를 다 넣으면 토큰이 늘어나니까,
+    간단히 최근 유저 메시지 2~3개만 묶어서 요약처럼 사용
+    """
+    user_msgs = [m["content"] for m in messages if m["role"] == "user"]
+    if not user_msgs:
+        return "추가 입력 없음"
+    last = user_msgs[-3:]
+    return " / ".join(last)
+
+
+# =========================================================
+# Card UI (디자인 개선 + 이미지 크게)
+# =========================================================
+def render_spot_card(spot: dict, reason: str):
     title = spot.get("title", "이름 없음")
     addr = spot.get("addr1", "")
     img = spot.get("firstimage") or spot.get("firstimage2")
-    overview = spot.get("overview", "")
 
-    with st.container(border=True):
-        if img:
-            st.image(img, use_container_width=True)
-        else:
-            st.write("🖼️ 이미지 없음")
+    # 이미지 크게: use_container_width=True + wide layout
+    st.markdown('<div class="big-card">', unsafe_allow_html=True)
 
-        st.markdown(f"### 📍 {title}")
-        if addr:
-            st.caption(f"📌 {addr}")
+    if img:
+        st.image(img, use_container_width=True)
+    else:
+        st.write("🖼️ 이미지 없음")
 
-        st.write(why)
+    st.markdown(f'<div class="spot-title">📍 {title}</div>', unsafe_allow_html=True)
+    if addr:
+        st.markdown(f'<div class="spot-addr">{addr}</div>', unsafe_allow_html=True)
+
+    st.markdown(f'<div class="spot-reason">{reason}</div>', unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 # =========================================================
@@ -309,7 +408,6 @@ if user_input:
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # 챗봇은 아직 결과 추천이 아니라 정보 수집용
     system_prompt_chat = """
 너는 국내 여행지 추천을 위한 정보 수집용 챗봇이야.
 사용자의 예산, 여행 기간, 출발지, 선호 활동(맛집/바다/산/도시/카페 등)을 자연스럽게 파악하고,
@@ -344,7 +442,7 @@ if user_input:
 
 
 # =========================================================
-# Result Button
+# 결과 보기 버튼
 # =========================================================
 st.divider()
 
@@ -364,38 +462,70 @@ if st.button("결과 보기", type="primary"):
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     survey_context = f"""
-[사용자 선호도 조사 결과]
 - 여행 목적: {q1}
 - 동반자: {q2}
 - 이동수단: {q3}
 """
 
-    with st.spinner("당신에게 어울리는 여행지를 찾는 중... 🧳✨"):
-        # 1) OpenAI로 추천 계획(JSON) 추출
+    with st.spinner("당신에게 어울리는 장소를 찾는 중... 🧳✨"):
+        # 1) 추천 계획 JSON 생성
         plan = extract_recommendation_plan(client, survey_context, st.session_state.messages)
 
-        # 2) TourAPI로 여행지 후보 검색 후 3개 선정
+        # 2) TourAPI로 3곳 선정
         spots = pick_top3_spots(plan)
 
-    # 결과 출력
-    st.markdown("## ✅ 추천 국내 여행지 3곳")
+        # 3) 추천 이유 생성(OpenAI)
+        chat_summary = build_chat_summary(st.session_state.messages)
+        keywords = plan.get("keywords", [])
 
-    style_summary = plan.get("style_summary", "")
-    keywords = plan.get("keywords", [])
+        reasons = {}
+        for spot in spots:
+            cid = spot.get("contentid", "")
+            title = spot.get("title", "")
+            addr = spot.get("addr1", "")
 
-    if style_summary:
-        st.caption(f"여행 스타일: {style_summary}")
-    if keywords:
-        st.caption("추천 키워드: " + ", ".join(keywords))
+            # LLM이 추천 이유 생성
+            reasons[cid] = generate_reason_for_spot(
+                OPENAI_API_KEY,
+                survey_context=survey_context,
+                chat_summary=chat_summary,
+                spot_title=title,
+                spot_addr=addr,
+                keywords=keywords,
+            )
 
-    if not spots:
-        st.warning("추천 여행지를 찾지 못했어요. 지역을 바꿔서 다시 시도해 주세요!")
-        st.stop()
+    # 결과 저장 (다시 테스트하기용)
+    st.session_state.plan = plan
+    st.session_state.results = spots
+    st.session_state.reasons = reasons
 
-    # 카드 3개를 가로로
+# =========================================================
+# 결과 화면 출력
+# =========================================================
+if st.session_state.results:
+    spots = st.session_state.results
+    plan = st.session_state.plan or {}
+    reasons = st.session_state.reasons or {}
+
+    # 요구사항 헤더
+    first_title = spots[0].get("title", "추천 여행지")
+    st.markdown(f"# 당신에게 딱인 장소는 **{first_title}**!")
+
+    # 카드 3열
     cols = st.columns(3)
-
     for i, spot in enumerate(spots):
-        why = "선호도(목적/동반자/이동수단) + 채팅으로 입력한 조건에 잘 맞는 여행지예요!"
+        cid = spot.get("contentid", "")
+        reason = reasons.get(cid, "선호도와 입력한 조건에 잘 맞는 장소예요!")
         with cols[i]:
-            render_spot_card(spot, why)
+            render_spot_card(spot, reason)
+
+    st.write("")
+    st.write("")
+
+    # 하단 다시 테스트하기 버튼
+    if st.button("🔄 다시 테스트하기", type="secondary"):
+        # 새 결과가 나오도록 캐시된 결과를 날림
+        st.session_state.results = None
+        st.session_state.plan = None
+        st.session_state.reasons = {}
+        st.rerun()
