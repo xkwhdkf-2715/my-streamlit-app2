@@ -299,7 +299,7 @@ def pick_top3_spots(plan: dict) -> list:
 
 
 # =========================================================
-# OpenAI: 카드 추천 이유 생성 (핵심!)
+# OpenAI: 카드 추천 이유 생성
 # =========================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def generate_reason_for_spot(
@@ -310,10 +310,6 @@ def generate_reason_for_spot(
     spot_addr: str,
     keywords: list,
 ) -> str:
-    """
-    카드에 넣을 추천 이유 1~2줄 생성
-    """
-
     client = OpenAI(api_key=openai_key)
 
     prompt = f"""
@@ -349,32 +345,23 @@ def generate_reason_for_spot(
         temperature=0.6,
     )
 
-    text = res.choices[0].message.content.strip()
-    return text
+    return res.choices[0].message.content.strip()
 
 
 def build_chat_summary(messages: list) -> str:
-    """
-    대화 전체를 다 넣으면 토큰이 늘어나니까,
-    간단히 최근 유저 메시지 2~3개만 묶어서 요약처럼 사용
-    """
     user_msgs = [m["content"] for m in messages if m["role"] == "user"]
     if not user_msgs:
         return "추가 입력 없음"
-    last = user_msgs[-3:]
-    return " / ".join(last)
+    return " / ".join(user_msgs[-3:])
 
 
 # =========================================================
-# Card UI (디자인 개선 + 이미지 크게)
+# Card UI
 # =========================================================
 def render_spot_card(spot: dict, reason: str):
     title = spot.get("title", "이름 없음")
     addr = spot.get("addr1", "")
     img = spot.get("firstimage") or spot.get("firstimage2")
-
-    # 이미지 크게: use_container_width=True + wide layout
-    st.markdown('<div class="big-card">', unsafe_allow_html=True)
 
     if img:
         st.image(img, use_container_width=True)
@@ -386,8 +373,6 @@ def render_spot_card(spot: dict, reason: str):
         st.markdown(f'<div class="spot-addr">{addr}</div>', unsafe_allow_html=True)
 
     st.markdown(f'<div class="spot-reason">{reason}</div>', unsafe_allow_html=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)
 
 
 # =========================================================
@@ -431,12 +416,7 @@ if user_input:
     messages_for_api.extend(st.session_state.messages)
 
     with st.chat_message("assistant"):
-        try:
-            assistant_text = stream_openai(client, messages_for_api)
-        except Exception as e:
-            st.error("OpenAI 요청 중 오류가 발생했어요.")
-            st.caption(str(e))
-            st.stop()
+        assistant_text = stream_openai(client, messages_for_api)
 
     st.session_state.messages.append({"role": "assistant", "content": assistant_text})
 
@@ -468,13 +448,9 @@ if st.button("결과 보기", type="primary"):
 """
 
     with st.spinner("당신에게 어울리는 장소를 찾는 중... 🧳✨"):
-        # 1) 추천 계획 JSON 생성
         plan = extract_recommendation_plan(client, survey_context, st.session_state.messages)
-
-        # 2) TourAPI로 3곳 선정
         spots = pick_top3_spots(plan)
 
-        # 3) 추천 이유 생성(OpenAI)
         chat_summary = build_chat_summary(st.session_state.messages)
         keywords = plan.get("keywords", [])
 
@@ -484,7 +460,6 @@ if st.button("결과 보기", type="primary"):
             title = spot.get("title", "")
             addr = spot.get("addr1", "")
 
-            # LLM이 추천 이유 생성
             reasons[cid] = generate_reason_for_spot(
                 OPENAI_API_KEY,
                 survey_context=survey_context,
@@ -494,24 +469,21 @@ if st.button("결과 보기", type="primary"):
                 keywords=keywords,
             )
 
-    # 결과 저장 (다시 테스트하기용)
     st.session_state.plan = plan
     st.session_state.results = spots
     st.session_state.reasons = reasons
+
 
 # =========================================================
 # 결과 화면 출력
 # =========================================================
 if st.session_state.results:
     spots = st.session_state.results
-    plan = st.session_state.plan or {}
     reasons = st.session_state.reasons or {}
 
-    # 요구사항 헤더
-    first_title = spots[0].get("title", "추천 여행지")
-    st.markdown(f"# 당신에게 딱인 장소는 **{first_title}**!")
+    # ✅ 수정된 헤더 (고정 문구)
+    st.markdown("# 지금 당신에게 딱인 장소는 ...")
 
-    # 카드 3열
     cols = st.columns(3)
     for i, spot in enumerate(spots):
         cid = spot.get("contentid", "")
@@ -522,9 +494,7 @@ if st.session_state.results:
     st.write("")
     st.write("")
 
-    # 하단 다시 테스트하기 버튼
     if st.button("🔄 다시 테스트하기", type="secondary"):
-        # 새 결과가 나오도록 캐시된 결과를 날림
         st.session_state.results = None
         st.session_state.plan = None
         st.session_state.reasons = {}
