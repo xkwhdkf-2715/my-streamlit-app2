@@ -72,6 +72,14 @@ st.markdown(
         border-radius: 999px;
         background: rgba(0,0,0,0.06);
     }
+
+    /* ✅ 지도 버튼(세로) 스타일 약간 개선 */
+    .map-links {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 8px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -177,13 +185,10 @@ def join_or_none(values: list) -> str:
     return ", ".join(values) if values else "선택 없음"
 
 def validate_min_one_each() -> bool:
-    # 추천 품질을 위해 핵심 3개는 필수
     return bool(purpose) and bool(transport) and bool(trip_days)
 
 def build_access_hint(transport_list: list, trip_days_list: list, crowd_list: list) -> str:
     hints = []
-
-    # 교통 다양성 우선
     if len(transport_list) >= 2:
         hints.append("이동수단을 2개 이상 선택했으니, 기차/버스/차/비행기 등 다양한 교통수단으로 접근 가능한 권역을 우선 고려해.")
     else:
@@ -195,19 +200,14 @@ def build_access_hint(transport_list: list, trip_days_list: list, crowd_list: li
             hints.append("고속버스 선호가 있으니 버스터미널로 접근 쉬운 도시권(예: 전주, 속초, 대구 등)을 고려해.")
         if "자동차" in transport_list:
             hints.append("자동차 선호가 있으니 드라이브/근교/자연 접근성이 좋은 권역(예: 강원, 남해, 서해안 등)을 고려해.")
-
-    # 기간
     if "당일여행" in trip_days_list:
         hints.append("당일여행이 포함되므로, 대도시 근교/이동 부담이 적은 권역을 우선 고려해.")
     if "3박 이상" in trip_days_list:
         hints.append("3박 이상도 가능하므로 섬/원거리(예: 제주, 남해/동해 깊은 지역)도 후보에 포함해.")
-
-    # 혼잡도
     if "조용하고 한적한 곳" in crowd_list and "사람 많은 핫플" not in crowd_list:
-        hints.append("조용한 곳 선호이므로 너무 붐비는 도심 번화가보다는 자연/산책/외곽 코스를 우선 고려해.")
+        hints.append("조용한 곳 선호이므로 붐비는 도심 번화가보다는 자연/산책/외곽 코스를 우선 고려해.")
     if "사람 많은 핫플" in crowd_list and "조용하고 한적한 곳" not in crowd_list:
         hints.append("핫플 선호이므로 접근성 좋은 인기 지역/도심권/핫플 밀집 권역을 우선 고려해.")
-
     return "\n".join([f"- {h}" for h in hints]) if hints else "- 특별한 추가 힌트 없음"
 
 def build_chat_summary(messages: list) -> str:
@@ -239,7 +239,7 @@ def stream_openai(client: OpenAI, messages: list) -> str:
 # TourAPI
 # =========================================================
 def tourapi_get(endpoint: str, params: dict) -> dict:
-    url = f"{TOUR_BASE}/{endpoint}"
+    url = f"https://apis.data.go.kr/B551011/KorService2/{endpoint}"
     base_params = {
         "serviceKey": TOUR_API_KEY,
         "MobileOS": "ETC",
@@ -247,7 +247,6 @@ def tourapi_get(endpoint: str, params: dict) -> dict:
         "_type": "json",
     }
     base_params.update(params)
-
     r = requests.get(url, params=base_params, timeout=20)
     r.raise_for_status()
     return r.json()
@@ -269,7 +268,7 @@ def fetch_spots_by_area(area_code: int, limit: int = 80) -> list:
             "contentTypeId": CONTENT_TYPE_TOUR,
             "numOfRows": limit,
             "pageNo": 1,
-            "arrange": "P",  # 인기순
+            "arrange": "P",
         },
     )
     return safe_items(data)
@@ -278,14 +277,9 @@ def filter_spots_with_images(spots: list) -> list:
     return [s for s in spots if (s.get("firstimage") or s.get("firstimage2"))]
 
 # =========================================================
-# OpenAI -> Plan (areas, keywords)
+# OpenAI -> Plan
 # =========================================================
-def extract_recommendation_plan(
-    client: OpenAI,
-    survey_context: str,
-    chat_messages: list,
-    extra_hint: str,
-) -> dict:
+def extract_recommendation_plan(client: OpenAI, survey_context: str, chat_messages: list, extra_hint: str) -> dict:
     system_prompt = f"""
 너는 국내 여행지 추천을 위한 플래너야.
 사용자의 설문 결과 + 채팅 내용을 바탕으로
@@ -311,7 +305,6 @@ def extract_recommendation_plan(
 [교통/기간/혼잡도 힌트]
 {extra_hint}
 """
-
     messages_for_api = [{"role": "system", "content": system_prompt}]
     messages_for_api.append({"role": "system", "content": survey_context})
     messages_for_api.extend(chat_messages)
@@ -322,7 +315,6 @@ def extract_recommendation_plan(
         temperature=0.4,
     )
     text = res.choices[0].message.content.strip()
-
     try:
         start = text.find("{")
         end = text.rfind("}")
@@ -343,7 +335,7 @@ def extract_recommendation_plan(
         }
 
 # =========================================================
-# Pick 3 spots (random from pooled candidates)
+# Pick spots
 # =========================================================
 def pick_3_random_spots(plan: dict, seed: int) -> list:
     rng = random.Random(seed)
@@ -353,9 +345,7 @@ def pick_3_random_spots(plan: dict, seed: int) -> list:
         {"name": "제주", "areaCode": 39},
     ]
 
-    pool = []
-    seen = set()
-
+    pool, seen = [], set()
     for area in areas[:5]:
         code = area.get("areaCode")
         if not code:
@@ -370,22 +360,13 @@ def pick_3_random_spots(plan: dict, seed: int) -> list:
 
     if len(pool) <= 3:
         return pool[:3]
-
     return rng.sample(pool, 3)
 
 # =========================================================
-# OpenAI -> reason
+# OpenAI -> Reason
 # =========================================================
-def generate_reason_for_spot(
-    openai_key: str,
-    survey_brief: str,
-    chat_summary: str,
-    spot_title: str,
-    spot_addr: str,
-    keywords: list,
-) -> str:
+def generate_reason_for_spot(openai_key: str, survey_brief: str, chat_summary: str, spot_title: str, spot_addr: str, keywords: list) -> str:
     client = OpenAI(api_key=openai_key)
-
     prompt = f"""
 너는 국내 여행지 추천 전문가야.
 아래 관광지를 추천하는 이유를 1~2문장으로 아주 깔끔하게 작성해줘.
@@ -410,7 +391,6 @@ def generate_reason_for_spot(
 - 이름: {spot_title}
 - 주소: {spot_addr}
 """
-
     res = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -419,16 +399,13 @@ def generate_reason_for_spot(
         ],
         temperature=0.5,
     )
-
     return res.choices[0].message.content.strip()
 
 # =========================================================
-# 지도 링크 버튼 (형식 2번)
+# ✅ 지도 링크 UI (세로로 3개)
 # =========================================================
-def render_map_links(title: str, lat, lng):
-    # lat/lng 없으면 검색 링크만 제공
+def render_map_links_vertical(title: str, lat, lng):
     q = urllib.parse.quote(title)
-
     kakao = f"https://map.kakao.com/link/search/{q}"
     naver = f"https://map.naver.com/v5/search/{q}"
     if lat and lng:
@@ -436,33 +413,20 @@ def render_map_links(title: str, lat, lng):
     else:
         google = f"https://www.google.com/maps/search/?api=1&query={q}"
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.link_button("카카오맵", kakao, use_container_width=True)
-    with c2:
-        st.link_button("네이버지도", naver, use_container_width=True)
-    with c3:
-        st.link_button("구글지도", google, use_container_width=True)
+    # 세로로 3개 버튼
+    st.link_button("카카오맵", kakao, use_container_width=True)
+    st.link_button("네이버지도", naver, use_container_width=True)
+    st.link_button("구글지도", google, use_container_width=True)
 
 # =========================================================
-# Card UI (지도 링크 포함)
+# Card UI
 # =========================================================
-def render_spot_card(
-    spot: dict,
-    reason: str,
-    purpose_list: list,
-    companion_list: list,
-    transport_list: list,
-    trip_days_list: list,
-    scenery_list: list,
-    activities_list: list,
-    crowd_list: list,
-):
+def render_spot_card(spot: dict, reason: str):
     title = spot.get("title", "이름 없음")
     addr = spot.get("addr1", "")
     img = spot.get("firstimage") or spot.get("firstimage2")
-    lat = spot.get("mapy")  # 위도
-    lng = spot.get("mapx")  # 경도
+    lat = spot.get("mapy")
+    lng = spot.get("mapx")
 
     if img:
         st.image(img, use_container_width=True)
@@ -475,28 +439,27 @@ def render_spot_card(
 
     st.markdown(f'<div class="spot-reason">{reason}</div>', unsafe_allow_html=True)
 
-    # 태그(깔끔한 라벨:값)
     st.markdown("<div class='tagbox'>", unsafe_allow_html=True)
-    if purpose_list:
-        st.markdown(f"<span class='tag'>🎯 목적: {', '.join(purpose_list)}</span>", unsafe_allow_html=True)
-    if trip_days_list:
-        st.markdown(f"<span class='tag'>🗓️ 기간: {', '.join(trip_days_list)}</span>", unsafe_allow_html=True)
-    if companion_list:
-        st.markdown(f"<span class='tag'>👥 동반자: {', '.join(companion_list)}</span>", unsafe_allow_html=True)
-    if transport_list:
-        st.markdown(f"<span class='tag'>🚆 이동수단: {', '.join(transport_list)}</span>", unsafe_allow_html=True)
-    if scenery_list:
-        st.markdown(f"<span class='tag'>🌄 풍경: {', '.join(scenery_list)}</span>", unsafe_allow_html=True)
-    if activities_list:
-        shown = activities_list[:3]
-        more = f" 외 {len(activities_list) - 3}개" if len(activities_list) > 3 else ""
+    if purpose:
+        st.markdown(f"<span class='tag'>🎯 목적: {', '.join(purpose)}</span>", unsafe_allow_html=True)
+    if trip_days:
+        st.markdown(f"<span class='tag'>🗓️ 기간: {', '.join(trip_days)}</span>", unsafe_allow_html=True)
+    if companion:
+        st.markdown(f"<span class='tag'>👥 동반자: {', '.join(companion)}</span>", unsafe_allow_html=True)
+    if transport:
+        st.markdown(f"<span class='tag'>🚆 이동수단: {', '.join(transport)}</span>", unsafe_allow_html=True)
+    if scenery:
+        st.markdown(f"<span class='tag'>🌄 풍경: {', '.join(scenery)}</span>", unsafe_allow_html=True)
+    if activities:
+        shown = activities[:3]
+        more = f" 외 {len(activities) - 3}개" if len(activities) > 3 else ""
         st.markdown(f"<span class='tag'>🎡 활동: {', '.join(shown)}{more}</span>", unsafe_allow_html=True)
-    if crowd_list:
-        st.markdown(f"<span class='tag'>👣 혼잡도: {', '.join(crowd_list)}</span>", unsafe_allow_html=True)
+    if crowd:
+        st.markdown(f"<span class='tag'>👣 혼잡도: {', '.join(crowd)}</span>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # 지도 링크 버튼 (카드 하단)
-    render_map_links(title, lat, lng)
+    # ✅ 지도 버튼 세로 출력
+    render_map_links_vertical(title, lat, lng)
 
 # =========================================================
 # Chat Input
@@ -514,7 +477,6 @@ if user_input:
         st.stop()
 
     client = OpenAI(api_key=OPENAI_API_KEY)
-
     system_prompt_chat = """
 너는 국내 여행지 추천을 위한 정보 수집용 챗봇이야.
 사용자의 예산, 출발지, 선호 활동, 일정/제약사항을 자연스럽게 파악하고,
@@ -562,7 +524,6 @@ def generate_recommendations():
 - 활동: {join_or_none(activities)}
 - 혼잡도: {join_or_none(crowd)}
 """
-
     extra_hint = build_access_hint(transport, trip_days, crowd)
 
     plan = extract_recommendation_plan(
@@ -652,14 +613,4 @@ if st.session_state.results:
         cid = spot.get("contentid", "")
         reason = reasons.get(cid, "선호도와 입력한 조건에 잘 맞는 장소예요!")
         with cols[i]:
-            render_spot_card(
-                spot=spot,
-                reason=reason,
-                purpose_list=purpose,
-                companion_list=companion,
-                transport_list=transport,
-                trip_days_list=trip_days,
-                scenery_list=scenery,
-                activities_list=activities,
-                crowd_list=crowd,
-            )
+            render_spot_card(spot, reason)
