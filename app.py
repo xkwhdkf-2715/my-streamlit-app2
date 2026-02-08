@@ -6,6 +6,7 @@ import urllib.parse
 import requests
 import streamlit as st
 from openai import OpenAI
+from openai import APIConnectionError, RateLimitError, APITimeoutError, APIError
 
 # =========================================================
 # Page
@@ -34,7 +35,7 @@ TOUR_BASE = "https://apis.data.go.kr/B551011/KorService2"
 CONTENT_TYPE_TOUR = 12  # 관광지
 
 # =========================================================
-# CSS (카드 + 태그)
+# CSS
 # =========================================================
 st.markdown(
     """
@@ -72,14 +73,6 @@ st.markdown(
         border-radius: 999px;
         background: rgba(0,0,0,0.06);
     }
-
-    /* ✅ 지도 버튼(세로) 스타일 약간 개선 */
-    .map-links {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        margin-top: 8px;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -95,7 +88,6 @@ if "messages" not in st.session_state:
             "content": "좋아요! 😊\n예산, 출발지(예: 서울/부산), 날짜(몇박 몇일), 하고 싶은 것(맛집/카페/전시/온천 등)을 편하게 입력해줘요!"
         }
     ]
-
 if "results" not in st.session_state:
     st.session_state.results = None
 if "plan" not in st.session_state:
@@ -112,71 +104,20 @@ st.title("내가 선호하는 국내 여행지는?")
 st.caption("선호도 조사(복수 선택) + 추가 입력을 기반으로, 당신에게 어울리는 국내 여행지 3곳을 추천해드려요! 🧳✨")
 
 # =========================================================
-# Survey (복수 선택)
+# Survey
 # =========================================================
 st.subheader("📝 선호도 조사 (복수 선택 가능)")
 st.caption("각 질문에서 여러 개 선택해도 괜찮아요! (추천 품질을 위해 최소 핵심 항목은 1개 이상 선택해주세요)")
 
-purpose = st.multiselect(
-    "질문 1: 여행 목적은 무엇인가요?",
-    ["힐링", "휴양", "액티비티", "관광"],
-    default=[],
-    key="purpose",
-)
-
-companion = st.multiselect(
-    "질문 2: 여행의 동반자는 누구인가요?",
-    ["혼자", "연인", "가족", "친구"],
-    default=[],
-    key="companion",
-)
-
-transport = st.multiselect(
-    "질문 3: 이동수단은 어떻게 되나요?",
-    ["고속버스", "기차", "자동차", "비행기"],
-    default=[],
-    key="transport",
-)
-
-trip_days = st.multiselect(
-    "질문 4: 여행 기간은 어떻게 되나요?",
-    ["당일여행", "1박 2일", "2박 3일", "3박 이상"],
-    default=[],
-    key="trip_days",
-)
-
-scenery = st.multiselect(
-    "질문 5: 선호 풍경/환경은 무엇인가요?",
-    ["바다", "산", "도시"],
-    default=[],
-    key="scenery",
-)
-
-activities = st.multiselect(
-    "질문 6: 하고 싶은 활동은 무엇인가요?",
-    ["맛집 탐방", "카페 투어", "사진 스팟", "온천,스파", "역사,문화", "전시, 뮤지엄", "테마파크"],
-    default=[],
-    key="activities",
-)
-
-crowd = st.multiselect(
-    "질문 7: 혼잡도 선호는 어떤가요?",
-    ["사람 많은 핫플", "조용하고 한적한 곳"],
-    default=[],
-    key="crowd",
-)
+purpose = st.multiselect("질문 1: 여행 목적은 무엇인가요?", ["힐링", "휴양", "액티비티", "관광"], default=[], key="purpose")
+companion = st.multiselect("질문 2: 여행의 동반자는 누구인가요?", ["혼자", "연인", "가족", "친구"], default=[], key="companion")
+transport = st.multiselect("질문 3: 이동수단은 어떻게 되나요?", ["고속버스", "기차", "자동차", "비행기"], default=[], key="transport")
+trip_days = st.multiselect("질문 4: 여행 기간은 어떻게 되나요?", ["당일여행", "1박 2일", "2박 3일", "3박 이상"], default=[], key="trip_days")
+scenery = st.multiselect("질문 5: 선호 풍경/환경은 무엇인가요?", ["바다", "산", "도시"], default=[], key="scenery")
+activities = st.multiselect("질문 6: 하고 싶은 활동은 무엇인가요?", ["맛집 탐방", "카페 투어", "사진 스팟", "온천,스파", "역사,문화", "전시, 뮤지엄", "테마파크"], default=[], key="activities")
+crowd = st.multiselect("질문 7: 혼잡도 선호는 어떤가요?", ["사람 많은 핫플", "조용하고 한적한 곳"], default=[], key="crowd")
 
 st.divider()
-
-# =========================================================
-# Chat UI
-# =========================================================
-st.subheader("💬 추가 정보 입력 (예산/출발지/특이사항)")
-st.caption("이 대화 내용도 추천에 반영돼요. (예: 예산 20만원, 서울 출발, 1박2일, 바다+맛집 위주)")
-
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
 
 # =========================================================
 # Helpers
@@ -191,15 +132,6 @@ def build_access_hint(transport_list: list, trip_days_list: list, crowd_list: li
     hints = []
     if len(transport_list) >= 2:
         hints.append("이동수단을 2개 이상 선택했으니, 기차/버스/차/비행기 등 다양한 교통수단으로 접근 가능한 권역을 우선 고려해.")
-    else:
-        if "비행기" in transport_list:
-            hints.append("비행기 선호가 있으니 공항 접근성이 좋은 권역(예: 제주, 부산, 여수/순천, 강릉/양양 등)을 고려해.")
-        if "기차" in transport_list:
-            hints.append("기차 선호가 있으니 KTX/기차 접근성이 좋은 권역(예: 강릉, 전주, 부산, 대전, 경주 등)을 고려해.")
-        if "고속버스" in transport_list:
-            hints.append("고속버스 선호가 있으니 버스터미널로 접근 쉬운 도시권(예: 전주, 속초, 대구 등)을 고려해.")
-        if "자동차" in transport_list:
-            hints.append("자동차 선호가 있으니 드라이브/근교/자연 접근성이 좋은 권역(예: 강원, 남해, 서해안 등)을 고려해.")
     if "당일여행" in trip_days_list:
         hints.append("당일여행이 포함되므로, 대도시 근교/이동 부담이 적은 권역을 우선 고려해.")
     if "3박 이상" in trip_days_list:
@@ -217,29 +149,66 @@ def build_chat_summary(messages: list) -> str:
     return " / ".join(user_msgs[-3:])
 
 # =========================================================
-# OpenAI Streaming (chat)
+# ✅ OpenAI 안전 호출 (재시도 + 스트리밍 fallback)
 # =========================================================
-def stream_openai(client: OpenAI, messages: list) -> str:
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        stream=True,
-    )
-    full_text = ""
+def safe_openai_chat_create(client: OpenAI, **kwargs):
+    """
+    APIConnectionError 같은 네트워크 오류에 대비해 재시도.
+    """
+    max_retries = 3
+    base_sleep = 1.2
+
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            return client.chat.completions.create(**kwargs)
+        except (APIConnectionError, APITimeoutError, RateLimitError, APIError) as e:
+            last_err = e
+            time.sleep(base_sleep * (2 ** attempt))
+    raise last_err
+
+def stream_openai_safe(client: OpenAI, messages: list) -> str:
+    """
+    1) 스트리밍 시도
+    2) 스트리밍 실패 시 비스트리밍으로 자동 fallback
+    """
     placeholder = st.empty()
-    for chunk in response:
-        delta = chunk.choices[0].delta.content if chunk.choices else None
-        if delta:
-            full_text += delta
-            placeholder.markdown(full_text)
-            time.sleep(0.01)
-    return full_text
+    full_text = ""
+
+    # 1) 스트리밍 시도 (재시도 포함)
+    try:
+        stream = safe_openai_chat_create(
+            client,
+            model="gpt-4o-mini",
+            messages=messages,
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                full_text += delta
+                placeholder.markdown(full_text)
+                time.sleep(0.01)
+        return full_text
+
+    except (APIConnectionError, APITimeoutError, RateLimitError, APIError):
+        # 2) fallback: 일반 호출
+        placeholder.info("연결이 불안정해서 스트리밍 대신 일반 응답으로 전환했어요.")
+        res = safe_openai_chat_create(
+            client,
+            model="gpt-4o-mini",
+            messages=messages,
+            stream=False,
+        )
+        text = res.choices[0].message.content.strip()
+        placeholder.markdown(text)
+        return text
 
 # =========================================================
 # TourAPI
 # =========================================================
 def tourapi_get(endpoint: str, params: dict) -> dict:
-    url = f"https://apis.data.go.kr/B551011/KorService2/{endpoint}"
+    url = f"{TOUR_BASE}/{endpoint}"
     base_params = {
         "serviceKey": TOUR_API_KEY,
         "MobileOS": "ETC",
@@ -247,6 +216,7 @@ def tourapi_get(endpoint: str, params: dict) -> dict:
         "_type": "json",
     }
     base_params.update(params)
+
     r = requests.get(url, params=base_params, timeout=20)
     r.raise_for_status()
     return r.json()
@@ -309,12 +279,14 @@ def extract_recommendation_plan(client: OpenAI, survey_context: str, chat_messag
     messages_for_api.append({"role": "system", "content": survey_context})
     messages_for_api.extend(chat_messages)
 
-    res = client.chat.completions.create(
+    res = safe_openai_chat_create(
+        client,
         model="gpt-4o-mini",
         messages=messages_for_api,
         temperature=0.4,
     )
     text = res.choices[0].message.content.strip()
+
     try:
         start = text.find("{")
         end = text.rfind("}")
@@ -344,7 +316,6 @@ def pick_3_random_spots(plan: dict, seed: int) -> list:
         {"name": "부산", "areaCode": 6},
         {"name": "제주", "areaCode": 39},
     ]
-
     pool, seen = [], set()
     for area in areas[:5]:
         code = area.get("areaCode")
@@ -357,7 +328,6 @@ def pick_3_random_spots(plan: dict, seed: int) -> list:
                 continue
             seen.add(cid)
             pool.append(s)
-
     if len(pool) <= 3:
         return pool[:3]
     return rng.sample(pool, 3)
@@ -391,7 +361,8 @@ def generate_reason_for_spot(openai_key: str, survey_brief: str, chat_summary: s
 - 이름: {spot_title}
 - 주소: {spot_addr}
 """
-    res = client.chat.completions.create(
+    res = safe_openai_chat_create(
+        client,
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "너는 짧고 깔끔하게 말하는 여행 추천 AI야."},
@@ -402,24 +373,20 @@ def generate_reason_for_spot(openai_key: str, survey_brief: str, chat_summary: s
     return res.choices[0].message.content.strip()
 
 # =========================================================
-# ✅ 지도 링크 UI (세로로 3개)
+# ✅ 지도 링크 (세로)
 # =========================================================
 def render_map_links_vertical(title: str, lat, lng):
     q = urllib.parse.quote(title)
     kakao = f"https://map.kakao.com/link/search/{q}"
     naver = f"https://map.naver.com/v5/search/{q}"
-    if lat and lng:
-        google = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
-    else:
-        google = f"https://www.google.com/maps/search/?api=1&query={q}"
+    google = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}" if lat and lng else f"https://www.google.com/maps/search/?api=1&query={q}"
 
-    # 세로로 3개 버튼
     st.link_button("카카오맵", kakao, use_container_width=True)
     st.link_button("네이버지도", naver, use_container_width=True)
     st.link_button("구글지도", google, use_container_width=True)
 
 # =========================================================
-# Card UI
+# Card
 # =========================================================
 def render_spot_card(spot: dict, reason: str):
     title = spot.get("title", "이름 없음")
@@ -458,8 +425,17 @@ def render_spot_card(spot: dict, reason: str):
         st.markdown(f"<span class='tag'>👣 혼잡도: {', '.join(crowd)}</span>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ✅ 지도 버튼 세로 출력
     render_map_links_vertical(title, lat, lng)
+
+# =========================================================
+# Chat UI (render)
+# =========================================================
+st.subheader("💬 추가 정보 입력 (예산/출발지/특이사항)")
+st.caption("이 대화 내용도 추천에 반영돼요. (예: 예산 20만원, 서울 출발, 1박2일, 바다+맛집 위주)")
+
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
 
 # =========================================================
 # Chat Input
@@ -477,6 +453,7 @@ if user_input:
         st.stop()
 
     client = OpenAI(api_key=OPENAI_API_KEY)
+
     system_prompt_chat = """
 너는 국내 여행지 추천을 위한 정보 수집용 챗봇이야.
 사용자의 예산, 출발지, 선호 활동, 일정/제약사항을 자연스럽게 파악하고,
@@ -504,7 +481,7 @@ if user_input:
     messages_for_api.extend(st.session_state.messages)
 
     with st.chat_message("assistant"):
-        assistant_text = stream_openai(client, messages_for_api)
+        assistant_text = stream_openai_safe(client, messages_for_api)
 
     st.session_state.messages.append({"role": "assistant", "content": assistant_text})
 
@@ -526,13 +503,7 @@ def generate_recommendations():
 """
     extra_hint = build_access_hint(transport, trip_days, crowd)
 
-    plan = extract_recommendation_plan(
-        client=client,
-        survey_context=survey_context,
-        chat_messages=st.session_state.messages,
-        extra_hint=extra_hint,
-    )
-
+    plan = extract_recommendation_plan(client, survey_context, st.session_state.messages, extra_hint)
     spots = pick_3_random_spots(plan, seed=st.session_state.rerun_seed)
 
     chat_summary = build_chat_summary(st.session_state.messages)
@@ -548,15 +519,7 @@ def generate_recommendations():
         cid = spot.get("contentid", "")
         title = spot.get("title", "")
         addr = spot.get("addr1", "")
-
-        reasons[cid] = generate_reason_for_spot(
-            openai_key=OPENAI_API_KEY,
-            survey_brief=survey_brief,
-            chat_summary=chat_summary,
-            spot_title=title,
-            spot_addr=addr,
-            keywords=keywords,
-        )
+        reasons[cid] = generate_reason_for_spot(OPENAI_API_KEY, survey_brief, chat_summary, title, addr, keywords)
 
     st.session_state.plan = plan
     st.session_state.results = spots
@@ -566,7 +529,6 @@ def generate_recommendations():
 # Buttons
 # =========================================================
 st.divider()
-
 col_a, col_b = st.columns([1, 1])
 with col_a:
     run_result = st.button("결과 보기", type="primary")
